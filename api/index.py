@@ -11,10 +11,10 @@ import google.generativeai as genai
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import numpy as np
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-import pypdf
 import pdfplumber
 
 app = Flask(__name__)
@@ -62,22 +62,31 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
 
 def split_questions(text: str) -> list:
     """Split input text into individual questions based on numbering patterns."""
-    # Try to split by common patterns: 1), 1., Q1, Question 1, etc.
-    patterns = [
-        r'(?=\n\s*\d+\s*[\.\)]\s)',  # 1. or 1)
-        r'(?=\n\s*Q\d+[\.\:\)]?\s)',  # Q1, Q1., Q1:
-        r'(?=\n\s*Question\s*\d+)',   # Question 1
-    ]
-    
+    lines = text.split('\n')
     questions = []
-    for pattern in patterns:
-        parts = re.split(pattern, text, flags=re.IGNORECASE)
-        parts = [p.strip() for p in parts if p.strip() and len(p.strip()) > 20]
-        if len(parts) > 1:
-            questions = parts
-            break
+    current_q = []
     
-    # If no pattern matched, return the whole text as one question
+    # Pattern to detect question start: 1), 1., Q1, etc.
+    q_pattern = re.compile(r'^\s*(\d+)\s*[\.\)]\s*')
+    
+    for line in lines:
+        match = q_pattern.match(line)
+        if match and len(current_q) > 0:
+            # Save previous question
+            q_text = '\n'.join(current_q).strip()
+            if len(q_text) > 20:
+                questions.append(q_text)
+            current_q = [line]
+        else:
+            current_q.append(line)
+    
+    # Don't forget the last question
+    if current_q:
+        q_text = '\n'.join(current_q).strip()
+        if len(q_text) > 20:
+            questions.append(q_text)
+    
+    # If no questions found, return the whole text
     if not questions:
         questions = [text.strip()]
     
@@ -85,7 +94,7 @@ def split_questions(text: str) -> list:
 
 
 def call_gemini_single(question_text: str, question_num: int) -> dict:
-    """Call Gemini for a single question."""
+    """Call Gemini for a single question with robust error handling."""
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set")
@@ -93,62 +102,84 @@ def call_gemini_single(question_text: str, question_num: int) -> dict:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    system_prompt = """You are a MATLAB expert assistant. Solve the given lab question.
+    system_prompt = """You are a MATLAB expert. For the given lab question, provide:
 
-Output a valid JSON object (no markdown code fences) with these fields:
+1. MATLAB code that solves the problem (complete and executable, with hardcoded values)
+2. Equivalent Python code using matplotlib/numpy to generate the same plot
+3. A brief conclusion (2-3 sentences)
 
-1. "matlab_code": Complete executable MATLAB code with comments. Hardcode all values, no input().
+CRITICAL FORMATTING RULES:
+- Output ONLY a JSON object with keys: matlab_code, python_plotting_code, conclusion
+- Use \\n for newlines in code strings (not actual line breaks within the JSON string values)
+- Escape all backslashes and quotes properly in JSON
+- The python_plotting_code must end with: plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+- Do NOT use markdown code fences
+- Keep code concise"""
 
-2. "python_plotting_code": Equivalent Python/Matplotlib code to generate the graph.
-   - Use numpy as np, matplotlib.pyplot as plt
-   - End with: plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
-   - Variable 'buffer' will be provided.
-
-3. "conclusion": 2-3 line academic conclusion about the results.
-
-Output ONLY the JSON object. Keep code concise."""
-
-    prompt = f"""Question {question_num}:
-{question_text}
-
-Generate the JSON response."""
+    prompt = f"Question {question_num}: {question_text[:1500]}"
 
     try:
         response = model.generate_content(
             [system_prompt, prompt],
             generation_config=genai.types.GenerationConfig(
-                temperature=0.3,
+                temperature=0.2,
                 max_output_tokens=4096,
             )
         )
         
         response_text = response.text.strip()
         
-        # Remove markdown code fences if present
-        if response_text.startswith('```'):
-            response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
-            response_text = re.sub(r'\n?```$', '', response_text)
+        # Clean up response
+        response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
+        response_text = re.sub(r'\s*```$', '', response_text)
         
-        # Try to parse JSON
+        # Try to find JSON object
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            response_text = json_match.group()
+        
+        # Parse JSON with error recovery
         try:
             result = json.loads(response_text)
         except json.JSONDecodeError:
-            json_match = re.search(r'\{[\s\S]*\}', response_text)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                raise ValueError("Could not parse response")
+            # Try to fix common JSON issues
+            fixed = response_text
+            fixed = re.sub(r',\s*}', '}', fixed)  # Remove trailing commas
+            fixed = re.sub(r',\s*]', ']', fixed)
+            try:
+                result = json.loads(fixed)
+            except:
+                # Last resort: extract parts manually
+                matlab_match = re.search(r'"matlab_code"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', response_text)
+                python_match = re.search(r'"python_plotting_code"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', response_text)
+                conclusion_match = re.search(r'"conclusion"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', response_text)
+                
+                result = {
+                    'matlab_code': matlab_match.group(1) if matlab_match else '% Code parsing error',
+                    'python_plotting_code': python_match.group(1) if python_match else '',
+                    'conclusion': conclusion_match.group(1) if conclusion_match else 'Conclusion parsing error'
+                }
+        
+        # Unescape the code
+        matlab_code = result.get('matlab_code', '% No code generated')
+        python_code = result.get('python_plotting_code', '')
+        conclusion = result.get('conclusion', 'No conclusion.')
+        
+        # Fix escaped newlines
+        matlab_code = matlab_code.replace('\\n', '\n')
+        python_code = python_code.replace('\\n', '\n')
         
         return {
-            'matlab_code': result.get('matlab_code', '% Code generation failed'),
-            'python_plotting_code': result.get('python_plotting_code', ''),
-            'conclusion': result.get('conclusion', 'No conclusion generated.')
+            'matlab_code': matlab_code,
+            'python_plotting_code': python_code,
+            'conclusion': conclusion
         }
+        
     except Exception as e:
         return {
-            'matlab_code': f'% Error generating code for this question: {str(e)[:50]}',
+            'matlab_code': f'% Error: {str(e)[:100]}',
             'python_plotting_code': '',
-            'conclusion': f'Error processing this question: {str(e)[:50]}'
+            'conclusion': f'Error processing question: {str(e)[:50]}'
         }
 
 
@@ -157,10 +188,13 @@ def generate_graph(python_code: str) -> bytes:
     configure_matlab_style()
     buffer = io.BytesIO()
     
-    if not python_code or len(python_code.strip()) < 10:
-        # Return a placeholder if no code
+    if not python_code or len(python_code.strip()) < 20:
+        # Generate a placeholder graph
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, 'No graph generated', ha='center', va='center', fontsize=14)
+        ax.text(0.5, 0.5, 'Graph generation pending', 
+                ha='center', va='center', fontsize=14, color='gray')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
         ax.axis('off')
         plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
         buffer.seek(0)
@@ -168,7 +202,7 @@ def generate_graph(python_code: str) -> bytes:
         return buffer.read()
     
     exec_globals = {
-        'np': __import__('numpy'),
+        'np': np,
         'plt': plt,
         'buffer': buffer,
         '__builtins__': {
@@ -191,9 +225,10 @@ def generate_graph(python_code: str) -> bytes:
     except Exception as e:
         plt.close('all')
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, f'Graph Error:\n{str(e)[:80]}',
-               ha='center', va='center', fontsize=10, color='red',
-               transform=ax.transAxes, wrap=True)
+        error_msg = str(e)[:120]
+        ax.text(0.5, 0.5, f'Graph Error:\n{error_msg}',
+               ha='center', va='center', fontsize=9, color='red',
+               wrap=True)
         ax.axis('off')
         
         error_buffer = io.BytesIO()
@@ -201,45 +236,72 @@ def generate_graph(python_code: str) -> bytes:
         error_buffer.seek(0)
         plt.close('all')
         return error_buffer.read()
-    finally:
-        plt.close('all')
 
 
-def assemble_multi_question_document(questions_data: list) -> bytes:
+def assemble_document(questions_data: list, student_name: str, roll_number: str, lab_number: str) -> bytes:
     """
-    Assemble a document with multiple questions, each with code, graph, and conclusion.
-    questions_data: list of dicts with keys: question, matlab_code, graph_bytes, conclusion, question_num
+    Assemble a document matching the user's college template format.
+    Header with name/roll/lab, red question text, code block, graph, output label.
     """
     doc = Document()
     
-    # Add title
-    title = doc.add_heading('Lab Report', 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Header section
+    if student_name:
+        p = doc.add_paragraph()
+        run = p.add_run(f"Name – {student_name}")
+        run.bold = True
+        run.font.color.rgb = RGBColor(139, 0, 0)  # Dark red
+        run.font.size = Pt(12)
+    
+    if roll_number:
+        p = doc.add_paragraph()
+        run = p.add_run(roll_number)
+        run.font.color.rgb = RGBColor(139, 0, 0)
+        run.font.size = Pt(12)
+    
+    if lab_number:
+        p = doc.add_paragraph()
+        run = p.add_run(f"WCT LAB {lab_number}")
+        run.font.color.rgb = RGBColor(139, 0, 0)
+        run.font.size = Pt(12)
+    
+    doc.add_paragraph()  # Spacing
     
     for item in questions_data:
-        # Question heading
-        q_heading = doc.add_heading(f"Question {item['question_num']}", level=1)
+        # Question text in RED
+        q_para = doc.add_paragraph()
+        q_run = q_para.add_run(f"{item['question_num']})  {item['question'][:400]}")
+        q_run.font.color.rgb = RGBColor(255, 0, 0)  # Red
+        q_run.font.size = Pt(11)
         
-        # Question text
-        doc.add_paragraph(item['question'][:500] + ('...' if len(item['question']) > 500 else ''))
+        doc.add_paragraph()  # Spacing
         
-        # MATLAB Code section
-        doc.add_heading('MATLAB Code', level=2)
-        code_para = doc.add_paragraph()
-        code_run = code_para.add_run(item['matlab_code'])
-        code_run.font.name = 'Courier New'
-        code_run.font.size = Pt(9)
+        # MATLAB Code in black, code-style font
+        code_lines = item['matlab_code'].split('\n')
+        for line in code_lines:
+            p = doc.add_paragraph()
+            # Check if line has special formatting (underline for function calls)
+            run = p.add_run(line)
+            run.font.name = 'Consolas'
+            run.font.size = Pt(10)
+            p.paragraph_format.space_after = Pt(0)
+            p.paragraph_format.space_before = Pt(0)
         
-        # Graph section
-        doc.add_heading('Output Graph', level=2)
+        doc.add_paragraph()  # Spacing
+        
+        # Output label
+        output_para = doc.add_paragraph()
+        output_run = output_para.add_run("Output:")
+        output_run.font.color.rgb = RGBColor(255, 0, 0)
+        output_run.font.size = Pt(11)
+        
+        # Graph
         if item['graph_bytes']:
-            doc.add_picture(io.BytesIO(item['graph_bytes']), width=Inches(5.5))
+            doc.add_picture(io.BytesIO(item['graph_bytes']), width=Inches(5))
         
-        # Conclusion section
-        doc.add_heading('Conclusion', level=2)
-        doc.add_paragraph(item['conclusion'])
+        doc.add_paragraph()  # Spacing
         
-        # Add page break between questions (except for last)
+        # Page break between questions (except last)
         if item != questions_data[-1]:
             doc.add_page_break()
     
@@ -251,7 +313,12 @@ def assemble_multi_question_document(questions_data: list) -> bytes:
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'LabAuto API', 'version': '2.0', 'multi_question': True})
+    return jsonify({
+        'status': 'ok', 
+        'service': 'LabAuto API', 
+        'version': '2.1',
+        'features': ['multi-question', 'template-format', 'matlab-graphs']
+    })
 
 
 @app.route('/generate', methods=['POST', 'OPTIONS'])
@@ -265,6 +332,9 @@ def generate():
         question_text = data.get('question_text', '')
         file_data = data.get('file_data')
         file_type = data.get('file_type', '')
+        student_name = data.get('student_name', '')
+        roll_number = data.get('roll_number', '')
+        lab_number = data.get('lab_number', '')
         
         # Extract text from file if provided
         if file_data and not question_text:
@@ -280,10 +350,14 @@ def generate():
         # Split into individual questions
         questions = split_questions(question_text)
         
+        # Limit to 4 questions max to avoid timeout
+        if len(questions) > 4:
+            questions = questions[:4]
+        
         # Process each question
         questions_data = []
         for i, q in enumerate(questions, 1):
-            # Call Gemini for this question
+            # Call Gemini
             ai_response = call_gemini_single(q, i)
             
             # Generate graph
@@ -297,8 +371,8 @@ def generate():
                 'conclusion': ai_response['conclusion']
             })
         
-        # Assemble the document with all questions
-        doc_bytes = assemble_multi_question_document(questions_data)
+        # Assemble document
+        doc_bytes = assemble_document(questions_data, student_name, roll_number, lab_number)
         
         return send_file(
             io.BytesIO(doc_bytes),

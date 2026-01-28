@@ -17,6 +17,7 @@
     let questionText = $state("");
     let uploadedFile: File | null = $state(null);
     let labNumber = $state("");
+    let rollNumber = $state("");
     let studentName = $state("");
     let isGenerating = $state(false);
     let generationStatus = $state("");
@@ -95,6 +96,7 @@
                 file_data?: string;
                 file_type?: string;
                 lab_number?: string;
+                roll_number?: string;
                 student_name?: string;
             } = {};
 
@@ -123,6 +125,7 @@
             }
 
             if (labNumber) requestData.lab_number = labNumber;
+            if (rollNumber) requestData.roll_number = rollNumber;
             if (studentName) requestData.student_name = studentName;
 
             // Simulate progress stages
@@ -167,10 +170,15 @@
     function downloadReport() {
         if (!generatedBlob) return;
 
+        // Generate filename: LAB{number}_{rollNumber}.docx
+        const labNum = labNumber.replace(/[^0-9]/g, "") || "X";
+        const roll = rollNumber.replace(/[^a-zA-Z0-9]/g, "") || "ROLL";
+        const filename = `LAB${labNum}_${roll}.docx`;
+
         const url = URL.createObjectURL(generatedBlob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `lab_report_${Date.now()}.docx`;
+        a.download = filename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -330,8 +338,42 @@ Example: Write a MATLAB program to plot the sine wave from 0 to 2π with 100 sam
                     </div>
                 {/if}
 
-                <!-- Optional Config -->
-                <details class="mt-6 group">
+                <!-- Required Info -->
+                <div class="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label class="block">
+                        <span
+                            class="text-sm font-medium text-zinc-700 mb-1 block"
+                            >Lab Number <span class="text-red-500">*</span
+                            ></span
+                        >
+                        <input
+                            type="text"
+                            bind:value={labNumber}
+                            placeholder="e.g., 3"
+                            class="w-full px-3 py-2 rounded-lg border border-zinc-200 bg-zinc-50/50
+								focus:bg-white focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200
+								placeholder:text-zinc-400 text-zinc-900 text-sm transition-all"
+                        />
+                    </label>
+                    <label class="block">
+                        <span
+                            class="text-sm font-medium text-zinc-700 mb-1 block"
+                            >Roll Number <span class="text-red-500">*</span
+                            ></span
+                        >
+                        <input
+                            type="text"
+                            bind:value={rollNumber}
+                            placeholder="e.g., 2023IMG035"
+                            class="w-full px-3 py-2 rounded-lg border border-zinc-200 bg-zinc-50/50
+								focus:bg-white focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200
+								placeholder:text-zinc-400 text-zinc-900 text-sm transition-all"
+                        />
+                    </label>
+                </div>
+
+                <!-- Optional: Student Name -->
+                <details class="mt-4 group">
                     <summary
                         class="text-sm text-zinc-500 cursor-pointer hover:text-zinc-700 transition-colors"
                     >
@@ -342,30 +384,16 @@ Example: Write a MATLAB program to plot the sine wave from 0 to 2π with 100 sam
                             >− Optional settings</span
                         >
                     </summary>
-                    <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="mt-4">
                         <label class="block">
                             <span
                                 class="text-sm font-medium text-zinc-600 mb-1 block"
-                                >Lab Number</span
-                            >
-                            <input
-                                type="text"
-                                bind:value={labNumber}
-                                placeholder="e.g., Lab 5"
-                                class="w-full px-3 py-2 rounded-lg border border-zinc-200 bg-zinc-50/50
-									focus:bg-white focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200
-									placeholder:text-zinc-400 text-zinc-900 text-sm transition-all"
-                            />
-                        </label>
-                        <label class="block">
-                            <span
-                                class="text-sm font-medium text-zinc-600 mb-1 block"
-                                >Student Name</span
+                                >Student Name (for header)</span
                             >
                             <input
                                 type="text"
                                 bind:value={studentName}
-                                placeholder="Your name"
+                                placeholder="Your full name"
                                 class="w-full px-3 py-2 rounded-lg border border-zinc-200 bg-zinc-50/50
 									focus:bg-white focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200
 									placeholder:text-zinc-400 text-zinc-900 text-sm transition-all"
