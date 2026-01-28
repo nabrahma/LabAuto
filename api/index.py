@@ -68,7 +68,9 @@ def call_gemini(question_text: str) -> dict:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    system_prompt = """You are a MATLAB expert assistant. You will receive a lab question.
+    system_prompt = """You are a MATLAB expert assistant. You will receive lab question(s).
+IMPORTANT: If multiple questions are provided, ONLY solve the FIRST question. Ignore all others.
+
 You must output a valid JSON object (no markdown code fences) containing exactly these fields:
 
 1. "matlab_code": The complete, executable MATLAB code to solve the problem.
@@ -89,18 +91,18 @@ You must output a valid JSON object (no markdown code fences) containing exactly
    - The behavior observed in the graph
    - Key insights from the results
 
-Respond with ONLY the JSON object, no additional text or markdown."""
+Respond with ONLY the JSON object, no additional text or markdown. Keep code concise."""
 
     prompt = f"""Lab Question:
 {question_text}
 
-Generate the JSON response with matlab_code, python_plotting_code, and conclusion."""
+Generate the JSON response with matlab_code, python_plotting_code, and conclusion. Focus on the FIRST question only if multiple are provided."""
 
     response = model.generate_content(
         [system_prompt, prompt],
         generation_config=genai.types.GenerationConfig(
             temperature=0.3,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
         )
     )
     
