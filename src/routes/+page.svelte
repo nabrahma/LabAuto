@@ -29,6 +29,11 @@
     let previewConclusion = $state("");
     let isDragging = $state(false);
 
+    // Batch mode state
+    let batchCount = $state(0);
+    let accumulatedBlobs: Blob[] = $state([]);
+    let totalQuestionsProcessed = $state(0);
+
     // File handling
     function handleFileSelect(event: Event) {
         const input = event.target as HTMLInputElement;
@@ -153,6 +158,11 @@
             // Get the blob
             generatedBlob = await response.blob();
 
+            // Track batch
+            batchCount++;
+            accumulatedBlobs.push(generatedBlob);
+            totalQuestionsProcessed += 4; // Max 4 per batch
+
             generationStatus = "Complete!";
             generationProgress = 100;
             isSuccess = true;
@@ -183,10 +193,14 @@
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
+
+        // Full reset after download
+        fullReset();
     }
 
-    // Reset form
-    function resetForm() {
+    // Add more questions - continue with another batch
+    function addMoreQuestions() {
+        // Keep accumulated blobs but reset input state
         questionText = "";
         uploadedFile = null;
         isSuccess = false;
@@ -194,6 +208,26 @@
         errorMessage = "";
         previewCode = "";
         previewConclusion = "";
+        // Keep: batchCount, accumulatedBlobs, totalQuestionsProcessed, labNumber, rollNumber, studentName
+    }
+
+    // Full reset for new lab
+    function fullReset() {
+        questionText = "";
+        uploadedFile = null;
+        isSuccess = false;
+        generatedBlob = null;
+        errorMessage = "";
+        previewCode = "";
+        previewConclusion = "";
+        batchCount = 0;
+        accumulatedBlobs = [];
+        totalQuestionsProcessed = 0;
+    }
+
+    // Reset form (same as addMoreQuestions for backwards compat)
+    function resetForm() {
+        fullReset();
     }
 </script>
 
@@ -254,15 +288,25 @@
                 {#if activeTab === "text"}
                     <div class="space-y-4">
                         <label class="block">
-                            <span
-                                class="text-sm font-medium text-zinc-700 mb-2 block"
-                                >Lab Question</span
-                            >
+                            <div class="flex justify-between items-center mb-2">
+                                <span class="text-sm font-medium text-zinc-700"
+                                    >Lab Questions</span
+                                >
+                                <span
+                                    class="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full"
+                                    >Max 4 questions per batch</span
+                                >
+                            </div>
                             <textarea
                                 bind:value={questionText}
-                                placeholder="Paste your MATLAB lab question here...
+                                placeholder="Paste up to 4 questions here...
 
-Example: Write a MATLAB program to plot the sine wave from 0 to 2π with 100 sample points. Include axis labels and title."
+1) First question...
+2) Second question...
+3) Third question...
+4) Fourth question...
+
+💡 For more questions, click 'Add More Questions' after processing this batch."
                                 class="w-full h-48 px-4 py-3 rounded-xl border border-zinc-200 bg-zinc-50/50
 									focus:bg-white focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200
 									placeholder:text-zinc-400 text-zinc-900 text-sm resize-none transition-all"
@@ -460,27 +504,39 @@ Example: Write a MATLAB program to plot the sine wave from 0 to 2π with 100 sam
                             <CheckCircle class="w-8 h-8 text-emerald-600" />
                         </div>
                         <h3 class="text-lg font-semibold text-zinc-900 mb-2">
-                            Report Generated!
+                            Batch {batchCount} Complete!
                         </h3>
-                        <p class="text-zinc-600 text-sm mb-6">
-                            Your MATLAB lab report is ready for download
+                        <p class="text-zinc-600 text-sm mb-2">
+                            Processed up to 4 questions in this batch
+                        </p>
+                        <p class="text-zinc-500 text-xs mb-6">
+                            Total batches: {batchCount} • Total questions: ~{totalQuestionsProcessed}
                         </p>
 
-                        <div
-                            class="flex flex-col sm:flex-row gap-3 justify-center"
-                        >
+                        <div class="flex flex-col gap-3">
+                            <!-- Primary: Add More Questions -->
+                            <button
+                                onclick={addMoreQuestions}
+                                class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-zinc-800 text-white font-medium hover:bg-zinc-700 transition-colors shadow-lg"
+                            >
+                                + Add More Questions (Next Batch)
+                            </button>
+
+                            <!-- Secondary: Download -->
                             <button
                                 onclick={downloadReport}
                                 class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 text-white font-medium hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-200"
                             >
                                 <Download class="w-5 h-5" />
-                                Download .docx
+                                Download Final Report
                             </button>
+
+                            <!-- Tertiary: Start Over -->
                             <button
                                 onclick={resetForm}
-                                class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl border border-zinc-200 text-zinc-700 font-medium hover:bg-zinc-50 transition-colors"
+                                class="text-sm text-zinc-500 hover:text-zinc-700 transition-colors mt-2"
                             >
-                                Generate Another
+                                Start New Lab (Reset All)
                             </button>
                         </div>
                     </div>
