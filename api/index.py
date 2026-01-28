@@ -12,6 +12,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy import stats
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -94,36 +95,49 @@ def split_questions(text: str) -> list:
 
 
 def call_gemini_single(question_text: str, question_num: int) -> dict:
-    """Call Gemini for a single question with robust error handling."""
+    """Call Gemini Pro for high-quality MATLAB code generation."""
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set")
     
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # Use gemini-1.5-pro for better quality code
+    model = genai.GenerativeModel('gemini-1.5-pro')
     
-    system_prompt = """You are a MATLAB expert. For the given lab question, provide:
+    system_prompt = """You are an expert MATLAB programmer. Generate high-quality, professional MATLAB code.
 
-1. MATLAB code that solves the problem (complete and executable, with hardcoded values)
-2. Equivalent Python code using matplotlib/numpy to generate the same plot
-3. A brief conclusion (2-3 sentences)
+REQUIREMENTS:
+1. Write clean, well-commented MATLAB code that would be used in an academic lab report
+2. Use proper MATLAB functions (randn, exprnd, raylrnd, histogram, subplot, etc.)
+3. Include clc; clear; at the start
+4. Use meaningful variable names
+5. Add proper axis labels, titles, legends, and grid
 
-CRITICAL FORMATTING RULES:
-- Output ONLY a JSON object with keys: matlab_code, python_plotting_code, conclusion
-- Use \\n for newlines in code strings (not actual line breaks within the JSON string values)
-- Escape all backslashes and quotes properly in JSON
-- The python_plotting_code must end with: plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
-- Do NOT use markdown code fences
-- Keep code concise"""
+For the Python plotting code:
+- Use numpy (as np) and matplotlib.pyplot (as plt)
+- For statistical distributions: use np.random and scipy.stats
+- Import scipy.stats as stats at the beginning of your code
+- Match the MATLAB output exactly
+- End with: plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
 
-    prompt = f"Question {question_num}: {question_text[:1500]}"
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "matlab_code": "% Complete MATLAB code here",
+  "python_plotting_code": "import numpy as np\\nimport matplotlib.pyplot as plt\\nfrom scipy import stats\\n... complete code ...",
+  "conclusion": "2-3 sentence academic conclusion"
+}"""
+
+    prompt = f"""Question {question_num}:
+{question_text}
+
+Generate professional MATLAB code and equivalent Python plotting code."""
 
     try:
         response = model.generate_content(
             [system_prompt, prompt],
             generation_config=genai.types.GenerationConfig(
                 temperature=0.2,
-                max_output_tokens=4096,
+                max_output_tokens=8192,
             )
         )
         
@@ -138,21 +152,21 @@ CRITICAL FORMATTING RULES:
         if json_match:
             response_text = json_match.group()
         
-        # Parse JSON with error recovery
+        # Parse JSON
         try:
             result = json.loads(response_text)
         except json.JSONDecodeError:
             # Try to fix common JSON issues
             fixed = response_text
-            fixed = re.sub(r',\s*}', '}', fixed)  # Remove trailing commas
+            fixed = re.sub(r',\s*}', '}', fixed)
             fixed = re.sub(r',\s*]', ']', fixed)
             try:
                 result = json.loads(fixed)
             except:
-                # Last resort: extract parts manually
-                matlab_match = re.search(r'"matlab_code"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', response_text)
-                python_match = re.search(r'"python_plotting_code"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', response_text)
-                conclusion_match = re.search(r'"conclusion"\s*:\s*"([^"]*(?:\\"[^"]*)*)"', response_text)
+                # Manual extraction
+                matlab_match = re.search(r'"matlab_code"\s*:\s*"((?:[^"\\]|\\.)*)"', response_text, re.DOTALL)
+                python_match = re.search(r'"python_plotting_code"\s*:\s*"((?:[^"\\]|\\.)*)"', response_text, re.DOTALL)
+                conclusion_match = re.search(r'"conclusion"\s*:\s*"((?:[^"\\]|\\.)*)"', response_text, re.DOTALL)
                 
                 result = {
                     'matlab_code': matlab_match.group(1) if matlab_match else '% Code parsing error',
@@ -160,14 +174,14 @@ CRITICAL FORMATTING RULES:
                     'conclusion': conclusion_match.group(1) if conclusion_match else 'Conclusion parsing error'
                 }
         
-        # Unescape the code
+        # Process the code
         matlab_code = result.get('matlab_code', '% No code generated')
         python_code = result.get('python_plotting_code', '')
         conclusion = result.get('conclusion', 'No conclusion.')
         
-        # Fix escaped newlines
-        matlab_code = matlab_code.replace('\\n', '\n')
-        python_code = python_code.replace('\\n', '\n')
+        # Fix escaped characters
+        matlab_code = matlab_code.replace('\\n', '\n').replace('\\t', '\t')
+        python_code = python_code.replace('\\n', '\n').replace('\\t', '\t')
         
         return {
             'matlab_code': matlab_code,
@@ -201,19 +215,22 @@ def generate_graph(python_code: str) -> bytes:
         plt.close('all')
         return buffer.read()
     
+    # Full builtins + scipy.stats for statistical functions
     exec_globals = {
         'np': np,
         'plt': plt,
+        'stats': stats,
         'buffer': buffer,
-        '__builtins__': {
-            'range': range, 'len': len, 'abs': abs, 'min': min, 'max': max,
-            'sum': sum, 'round': round, 'int': int, 'float': float,
-            'str': str, 'list': list, 'tuple': tuple, 'dict': dict, 'print': print,
-        }
+        '__builtins__': __builtins__,  # Use full builtins to allow imports
     }
     
     try:
         plt.close('all')
+        
+        # Add scipy stats import if needed
+        if 'from scipy' in python_code or 'scipy.stats' in python_code:
+            exec_globals['scipy'] = __import__('scipy')
+        
         exec(python_code, exec_globals)
         
         if buffer.tell() == 0:
@@ -225,7 +242,7 @@ def generate_graph(python_code: str) -> bytes:
     except Exception as e:
         plt.close('all')
         fig, ax = plt.subplots(figsize=(8, 6))
-        error_msg = str(e)[:120]
+        error_msg = str(e)[:150]
         ax.text(0.5, 0.5, f'Graph Error:\n{error_msg}',
                ha='center', va='center', fontsize=9, color='red',
                wrap=True)
@@ -270,7 +287,7 @@ def assemble_document(questions_data: list, student_name: str, roll_number: str,
     for item in questions_data:
         # Question text in RED
         q_para = doc.add_paragraph()
-        q_run = q_para.add_run(f"{item['question_num']})  {item['question'][:400]}")
+        q_run = q_para.add_run(f"{item['question_num']})  {item['question'][:500]}")
         q_run.font.color.rgb = RGBColor(255, 0, 0)  # Red
         q_run.font.size = Pt(11)
         
@@ -280,7 +297,6 @@ def assemble_document(questions_data: list, student_name: str, roll_number: str,
         code_lines = item['matlab_code'].split('\n')
         for line in code_lines:
             p = doc.add_paragraph()
-            # Check if line has special formatting (underline for function calls)
             run = p.add_run(line)
             run.font.name = 'Consolas'
             run.font.size = Pt(10)
@@ -297,7 +313,7 @@ def assemble_document(questions_data: list, student_name: str, roll_number: str,
         
         # Graph
         if item['graph_bytes']:
-            doc.add_picture(io.BytesIO(item['graph_bytes']), width=Inches(5))
+            doc.add_picture(io.BytesIO(item['graph_bytes']), width=Inches(5.5))
         
         doc.add_paragraph()  # Spacing
         
@@ -316,8 +332,9 @@ def health():
     return jsonify({
         'status': 'ok', 
         'service': 'LabAuto API', 
-        'version': '2.1',
-        'features': ['multi-question', 'template-format', 'matlab-graphs']
+        'version': '2.2',
+        'model': 'gemini-1.5-pro',
+        'features': ['multi-question', 'template-format', 'matlab-graphs', 'batch-accumulation']
     })
 
 
@@ -335,6 +352,7 @@ def generate():
         student_name = data.get('student_name', '')
         roll_number = data.get('roll_number', '')
         lab_number = data.get('lab_number', '')
+        start_question_num = data.get('start_question_num', 1)  # For batch continuation
         
         # Extract text from file if provided
         if file_data and not question_text:
@@ -356,8 +374,8 @@ def generate():
         
         # Process each question
         questions_data = []
-        for i, q in enumerate(questions, 1):
-            # Call Gemini
+        for i, q in enumerate(questions, start_question_num):
+            # Call Gemini Pro
             ai_response = call_gemini_single(q, i)
             
             # Generate graph

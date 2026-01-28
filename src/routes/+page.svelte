@@ -29,10 +29,10 @@
     let previewConclusion = $state("");
     let isDragging = $state(false);
 
-    // Batch mode state
+    // Batch mode state - accumulate question TEXT, not blobs
     let batchCount = $state(0);
-    let accumulatedBlobs: Blob[] = $state([]);
-    let totalQuestionsProcessed = $state(0);
+    let accumulatedQuestions: string[] = $state([]);
+    let isReadyToDownload = $state(false);
 
     // File handling
     function handleFileSelect(event: Event) {
@@ -158,10 +158,9 @@
             // Get the blob
             generatedBlob = await response.blob();
 
-            // Track batch
+            // Track batch - store the question text for potential re-generation
             batchCount++;
-            accumulatedBlobs.push(generatedBlob);
-            totalQuestionsProcessed += 4; // Max 4 per batch
+            accumulatedQuestions.push(questionText);
 
             generationStatus = "Complete!";
             generationProgress = 100;
@@ -198,9 +197,9 @@
         fullReset();
     }
 
-    // Add more questions - continue with another batch
-    function addMoreQuestions() {
-        // Keep accumulated blobs but reset input state
+    // Add more questions - store current and prepare for next batch
+    async function addMoreQuestions() {
+        // Clear input but keep accumulated questions and batch count
         questionText = "";
         uploadedFile = null;
         isSuccess = false;
@@ -208,7 +207,85 @@
         errorMessage = "";
         previewCode = "";
         previewConclusion = "";
-        // Keep: batchCount, accumulatedBlobs, totalQuestionsProcessed, labNumber, rollNumber, studentName
+        isReadyToDownload = false;
+        // Keep: batchCount, accumulatedQuestions, labNumber, rollNumber, studentName
+    }
+
+    // Generate final combined report from all accumulated questions
+    async function generateFinalReport() {
+        if (accumulatedQuestions.length === 0) return;
+
+        isGenerating = true;
+        generationProgress = 0;
+        generationStatus = "Processing all batches...";
+
+        try {
+            // Combine all accumulated questions into one numbered list
+            let combinedText = "";
+            let questionCounter = 1;
+
+            for (const batchText of accumulatedQuestions) {
+                // Each batch may have multiple questions
+                const lines = batchText.trim().split("\n");
+                for (const line of lines) {
+                    if (line.trim()) {
+                        // Renumber questions
+                        const cleanLine = line.replace(
+                            /^\s*\d+\s*[\.)\:]\s*/,
+                            "",
+                        );
+                        if (cleanLine.length > 20) {
+                            combinedText += `${questionCounter}) ${cleanLine}\n\n`;
+                            questionCounter++;
+                        } else {
+                            combinedText += line + "\n";
+                        }
+                    }
+                }
+            }
+
+            // Send all to backend
+            const requestData: {
+                question_text: string;
+                lab_number?: string;
+                roll_number?: string;
+                student_name?: string;
+            } = { question_text: combinedText };
+
+            if (labNumber) requestData.lab_number = labNumber;
+            if (rollNumber) requestData.roll_number = rollNumber;
+            if (studentName) requestData.student_name = studentName;
+
+            generationProgress = 30;
+            generationStatus = "Generating all MATLAB code...";
+
+            const response = await fetch(`${API_URL}/generate`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(requestData),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || "Failed to generate report");
+            }
+
+            generationStatus = "Creating combined document...";
+            generationProgress = 85;
+
+            generatedBlob = await response.blob();
+
+            generationProgress = 100;
+            generationStatus = "Complete!";
+            isReadyToDownload = true;
+        } catch (err) {
+            errorMessage =
+                err instanceof Error
+                    ? err.message
+                    : "An unexpected error occurred";
+        } finally {
+            isGenerating = false;
+        }
     }
 
     // Full reset for new lab
@@ -221,8 +298,8 @@
         previewCode = "";
         previewConclusion = "";
         batchCount = 0;
-        accumulatedBlobs = [];
-        totalQuestionsProcessed = 0;
+        accumulatedQuestions = [];
+        isReadyToDownload = false;
     }
 
     // Reset form (same as addMoreQuestions for backwards compat)
@@ -504,13 +581,14 @@
                             <CheckCircle class="w-8 h-8 text-emerald-600" />
                         </div>
                         <h3 class="text-lg font-semibold text-zinc-900 mb-2">
-                            Batch {batchCount} Complete!
+                            Batch {batchCount} Saved!
                         </h3>
                         <p class="text-zinc-600 text-sm mb-2">
-                            Processed up to 4 questions in this batch
+                            Questions added to your report
                         </p>
                         <p class="text-zinc-500 text-xs mb-6">
-                            Total batches: {batchCount} • Total questions: ~{totalQuestionsProcessed}
+                            Total batches saved: {batchCount} ({accumulatedQuestions.length}
+                            batch{accumulatedQuestions.length > 1 ? "es" : ""})
                         </p>
 
                         <div class="flex flex-col gap-3">
@@ -519,16 +597,22 @@
                                 onclick={addMoreQuestions}
                                 class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-zinc-800 text-white font-medium hover:bg-zinc-700 transition-colors shadow-lg"
                             >
-                                + Add More Questions (Next Batch)
+                                + Add More Questions
                             </button>
 
-                            <!-- Secondary: Download -->
+                            <!-- Secondary: Generate Final Combined Report -->
                             <button
-                                onclick={downloadReport}
-                                class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 text-white font-medium hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-200"
+                                onclick={generateFinalReport}
+                                disabled={isGenerating}
+                                class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 text-white font-medium hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-200 disabled:bg-gray-400"
                             >
-                                <Download class="w-5 h-5" />
-                                Download Final Report
+                                {#if isGenerating}
+                                    <Loader2 class="w-5 h-5 animate-spin" />
+                                    Generating...
+                                {:else}
+                                    <Sparkles class="w-5 h-5" />
+                                    Generate Final Combined Report
+                                {/if}
                             </button>
 
                             <!-- Tertiary: Start Over -->
@@ -537,6 +621,45 @@
                                 class="text-sm text-zinc-500 hover:text-zinc-700 transition-colors mt-2"
                             >
                                 Start New Lab (Reset All)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            {/if}
+
+            <!-- Ready to Download State -->
+            {#if isReadyToDownload && generatedBlob}
+                <div
+                    class="border-t border-zinc-200 p-6 sm:p-8 bg-gradient-to-br from-emerald-50 to-teal-50"
+                >
+                    <div class="text-center">
+                        <div
+                            class="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center mx-auto mb-4"
+                        >
+                            <CheckCircle class="w-8 h-8 text-emerald-600" />
+                        </div>
+                        <h3 class="text-lg font-semibold text-zinc-900 mb-2">
+                            Combined Report Ready! 🎉
+                        </h3>
+                        <p class="text-zinc-600 text-sm mb-6">
+                            All {batchCount} batch{batchCount > 1 ? "es" : ""} combined
+                            into one document
+                        </p>
+
+                        <div class="flex flex-col gap-3">
+                            <button
+                                onclick={downloadReport}
+                                class="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 text-white font-medium hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-200"
+                            >
+                                <Download class="w-5 h-5" />
+                                Download Combined Report
+                            </button>
+
+                            <button
+                                onclick={resetForm}
+                                class="text-sm text-zinc-500 hover:text-zinc-700 transition-colors mt-2"
+                            >
+                                Start New Lab
                             </button>
                         </div>
                     </div>
