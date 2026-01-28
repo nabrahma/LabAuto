@@ -9,6 +9,9 @@
         Sparkles,
     } from "lucide-svelte";
 
+    // API URL - set via environment variable or use relative path for local dev
+    const API_URL = import.meta.env.VITE_API_URL || "";
+
     // State
     let activeTab: "text" | "file" = $state("text");
     let questionText = $state("");
@@ -127,7 +130,7 @@
             generationProgress = 30;
 
             // Call API
-            const response = await fetch("/api", {
+            const response = await fetch(`${API_URL}/generate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(requestData),
