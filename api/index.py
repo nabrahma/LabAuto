@@ -66,7 +66,7 @@ def call_gemini(question_text: str) -> dict:
         raise ValueError("GEMINI_API_KEY environment variable not set")
     
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash')
     
     system_prompt = """You are a MATLAB expert assistant. You will receive a lab question.
 You must output a valid JSON object (no markdown code fences) containing exactly these fields:
