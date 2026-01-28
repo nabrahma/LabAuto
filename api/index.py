@@ -95,14 +95,14 @@ def split_questions(text: str) -> list:
 
 
 def call_gemini_single(question_text: str, question_num: int) -> dict:
-    """Call Gemini Pro for high-quality MATLAB code generation."""
+    """Call Gemini for high-quality MATLAB code generation."""
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set")
     
     genai.configure(api_key=api_key)
-    # Use gemini-1.5-pro for better quality code
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    # Use gemini-2.0-flash for fast, high-quality responses
+    model = genai.GenerativeModel('gemini-2.0-flash')
     
     system_prompt = """You are an expert MATLAB programmer. Generate high-quality, professional MATLAB code.
 
