@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: labauto-api
+    runtime: python
+    buildCommand: pip install -r api/requirements.txt
+    startCommand: cd api && gunicorn index:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: GEMINI_API_KEY
+        sync: false
