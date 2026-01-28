@@ -101,8 +101,8 @@ def call_gemini_single(question_text: str, question_num: int) -> dict:
         raise ValueError("GEMINI_API_KEY environment variable not set")
     
     genai.configure(api_key=api_key)
-    # Use gemini-2.0-flash for fast, high-quality responses
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # Use gemini-3.0-flash for best quality responses
+    model = genai.GenerativeModel('gemini-3.0-flash')
     
     system_prompt = """You are an expert MATLAB programmer. Generate high-quality, professional MATLAB code.
 
