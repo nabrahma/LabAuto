@@ -1,4 +1,3 @@
-from http.server import BaseHTTPRequestHandler
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import json
@@ -13,7 +12,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from docx import Document
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import pypdf
 import pdfplumber
 
@@ -60,7 +60,32 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
     return '\n'.join(text_parts)
 
 
-def call_gemini(question_text: str) -> dict:
+def split_questions(text: str) -> list:
+    """Split input text into individual questions based on numbering patterns."""
+    # Try to split by common patterns: 1), 1., Q1, Question 1, etc.
+    patterns = [
+        r'(?=\n\s*\d+\s*[\.\)]\s)',  # 1. or 1)
+        r'(?=\n\s*Q\d+[\.\:\)]?\s)',  # Q1, Q1., Q1:
+        r'(?=\n\s*Question\s*\d+)',   # Question 1
+    ]
+    
+    questions = []
+    for pattern in patterns:
+        parts = re.split(pattern, text, flags=re.IGNORECASE)
+        parts = [p.strip() for p in parts if p.strip() and len(p.strip()) > 20]
+        if len(parts) > 1:
+            questions = parts
+            break
+    
+    # If no pattern matched, return the whole text as one question
+    if not questions:
+        questions = [text.strip()]
+    
+    return questions
+
+
+def call_gemini_single(question_text: str, question_num: int) -> dict:
+    """Call Gemini for a single question."""
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set")
@@ -68,69 +93,79 @@ def call_gemini(question_text: str) -> dict:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    system_prompt = """You are a MATLAB expert assistant. You will receive lab question(s).
-IMPORTANT: If multiple questions are provided, ONLY solve the FIRST question. Ignore all others.
+    system_prompt = """You are a MATLAB expert assistant. Solve the given lab question.
 
-You must output a valid JSON object (no markdown code fences) containing exactly these fields:
+Output a valid JSON object (no markdown code fences) with these fields:
 
-1. "matlab_code": The complete, executable MATLAB code to solve the problem.
-   - Ensure all variables are defined with example values.
-   - Do NOT use input() commands; hardcode example values.
-   - Include comments explaining each step.
-   - The code should generate a plot/graph when applicable.
+1. "matlab_code": Complete executable MATLAB code with comments. Hardcode all values, no input().
 
-2. "python_plotting_code": Equivalent Python code using Matplotlib that generates the same graph.
-   - Use numpy for numerical operations.
-   - Include: import numpy as np, import matplotlib.pyplot as plt
+2. "python_plotting_code": Equivalent Python/Matplotlib code to generate the graph.
+   - Use numpy as np, matplotlib.pyplot as plt
    - End with: plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
-   - Use 'buffer' as the output variable (it will be provided).
-   - Add plt.grid(True) for grid lines.
+   - Variable 'buffer' will be provided.
 
-3. "conclusion": A 3-4 line academic conclusion explaining:
-   - What the code demonstrates
-   - The behavior observed in the graph
-   - Key insights from the results
+3. "conclusion": 2-3 line academic conclusion about the results.
 
-Respond with ONLY the JSON object, no additional text or markdown. Keep code concise."""
+Output ONLY the JSON object. Keep code concise."""
 
-    prompt = f"""Lab Question:
+    prompt = f"""Question {question_num}:
 {question_text}
 
-Generate the JSON response with matlab_code, python_plotting_code, and conclusion. Focus on the FIRST question only if multiple are provided."""
+Generate the JSON response."""
 
-    response = model.generate_content(
-        [system_prompt, prompt],
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.3,
-            max_output_tokens=8192,
-        )
-    )
-    
-    response_text = response.text.strip()
-    
-    if response_text.startswith('```'):
-        response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
-        response_text = re.sub(r'\n?```$', '', response_text)
-    
     try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError as e:
-        json_match = re.search(r'\{[\s\S]*\}', response_text)
-        if json_match:
-            result = json.loads(json_match.group())
-        else:
-            raise ValueError(f"Failed to parse Gemini response as JSON: {e}")
-    
-    return {
-        'matlab_code': result.get('matlab_code', '% No code generated'),
-        'python_plotting_code': result.get('python_plotting_code', ''),
-        'conclusion': result.get('conclusion', 'No conclusion generated.')
-    }
+        response = model.generate_content(
+            [system_prompt, prompt],
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=4096,
+            )
+        )
+        
+        response_text = response.text.strip()
+        
+        # Remove markdown code fences if present
+        if response_text.startswith('```'):
+            response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
+            response_text = re.sub(r'\n?```$', '', response_text)
+        
+        # Try to parse JSON
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError:
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                raise ValueError("Could not parse response")
+        
+        return {
+            'matlab_code': result.get('matlab_code', '% Code generation failed'),
+            'python_plotting_code': result.get('python_plotting_code', ''),
+            'conclusion': result.get('conclusion', 'No conclusion generated.')
+        }
+    except Exception as e:
+        return {
+            'matlab_code': f'% Error generating code for this question: {str(e)[:50]}',
+            'python_plotting_code': '',
+            'conclusion': f'Error processing this question: {str(e)[:50]}'
+        }
 
 
 def generate_graph(python_code: str) -> bytes:
+    """Execute Python plotting code and return PNG bytes."""
     configure_matlab_style()
     buffer = io.BytesIO()
+    
+    if not python_code or len(python_code.strip()) < 10:
+        # Return a placeholder if no code
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.text(0.5, 0.5, 'No graph generated', ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+        buffer.seek(0)
+        plt.close('all')
+        return buffer.read()
     
     exec_globals = {
         'np': __import__('numpy'),
@@ -156,8 +191,8 @@ def generate_graph(python_code: str) -> bytes:
     except Exception as e:
         plt.close('all')
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, f'Graph Generation Error:\n{str(e)[:100]}',
-               ha='center', va='center', fontsize=12, color='red',
+        ax.text(0.5, 0.5, f'Graph Error:\n{str(e)[:80]}',
+               ha='center', va='center', fontsize=10, color='red',
                transform=ax.transAxes, wrap=True)
         ax.axis('off')
         
@@ -170,43 +205,43 @@ def generate_graph(python_code: str) -> bytes:
         plt.close('all')
 
 
-def assemble_document(question: str, matlab_code: str, graph_bytes: bytes, conclusion: str) -> bytes:
-    template_path = os.path.join(os.path.dirname(__file__), 'assets', 'template.docx')
+def assemble_multi_question_document(questions_data: list) -> bytes:
+    """
+    Assemble a document with multiple questions, each with code, graph, and conclusion.
+    questions_data: list of dicts with keys: question, matlab_code, graph_bytes, conclusion, question_num
+    """
+    doc = Document()
     
-    if not os.path.exists(template_path):
-        doc = Document()
-        doc.add_heading('Lab Report', 0)
-        doc.add_heading('Question', level=1)
-        doc.add_paragraph(question)
-        doc.add_heading('MATLAB Code', level=1)
+    # Add title
+    title = doc.add_heading('Lab Report', 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    for item in questions_data:
+        # Question heading
+        q_heading = doc.add_heading(f"Question {item['question_num']}", level=1)
+        
+        # Question text
+        doc.add_paragraph(item['question'][:500] + ('...' if len(item['question']) > 500 else ''))
+        
+        # MATLAB Code section
+        doc.add_heading('MATLAB Code', level=2)
         code_para = doc.add_paragraph()
-        code_run = code_para.add_run(matlab_code)
+        code_run = code_para.add_run(item['matlab_code'])
         code_run.font.name = 'Courier New'
         code_run.font.size = Pt(9)
-        doc.add_heading('Output Graph', level=1)
-        doc.add_picture(io.BytesIO(graph_bytes), width=Inches(6))
-        doc.add_heading('Conclusion', level=1)
-        doc.add_paragraph(conclusion)
-    else:
-        doc = Document(template_path)
         
-        for para in doc.paragraphs:
-            if '{{QUESTION}}' in para.text:
-                para.text = para.text.replace('{{QUESTION}}', question)
-            
-            if '{{CODE}}' in para.text:
-                para.clear()
-                code_run = para.add_run(matlab_code)
-                code_run.font.name = 'Courier New'
-                code_run.font.size = Pt(9)
-            
-            if '{{GRAPH}}' in para.text:
-                para.clear()
-                run = para.add_run()
-                run.add_picture(io.BytesIO(graph_bytes), width=Inches(6))
-            
-            if '{{CONCLUSION}}' in para.text:
-                para.text = para.text.replace('{{CONCLUSION}}', conclusion)
+        # Graph section
+        doc.add_heading('Output Graph', level=2)
+        if item['graph_bytes']:
+            doc.add_picture(io.BytesIO(item['graph_bytes']), width=Inches(5.5))
+        
+        # Conclusion section
+        doc.add_heading('Conclusion', level=2)
+        doc.add_paragraph(item['conclusion'])
+        
+        # Add page break between questions (except for last)
+        if item != questions_data[-1]:
+            doc.add_page_break()
     
     output_buffer = io.BytesIO()
     doc.save(output_buffer)
@@ -216,7 +251,7 @@ def assemble_document(question: str, matlab_code: str, graph_bytes: bytes, concl
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'LabAuto API'})
+    return jsonify({'status': 'ok', 'service': 'LabAuto API', 'version': '2.0', 'multi_question': True})
 
 
 @app.route('/generate', methods=['POST', 'OPTIONS'])
@@ -231,6 +266,7 @@ def generate():
         file_data = data.get('file_data')
         file_type = data.get('file_type', '')
         
+        # Extract text from file if provided
         if file_data and not question_text:
             file_bytes = base64.b64decode(file_data)
             if file_type == 'pdf':
@@ -241,14 +277,28 @@ def generate():
         if not question_text:
             return jsonify({'error': 'No question text provided'}), 400
         
-        ai_response = call_gemini(question_text)
-        graph_bytes = generate_graph(ai_response['python_plotting_code'])
-        doc_bytes = assemble_document(
-            question=question_text,
-            matlab_code=ai_response['matlab_code'],
-            graph_bytes=graph_bytes,
-            conclusion=ai_response['conclusion']
-        )
+        # Split into individual questions
+        questions = split_questions(question_text)
+        
+        # Process each question
+        questions_data = []
+        for i, q in enumerate(questions, 1):
+            # Call Gemini for this question
+            ai_response = call_gemini_single(q, i)
+            
+            # Generate graph
+            graph_bytes = generate_graph(ai_response['python_plotting_code'])
+            
+            questions_data.append({
+                'question_num': i,
+                'question': q,
+                'matlab_code': ai_response['matlab_code'],
+                'graph_bytes': graph_bytes,
+                'conclusion': ai_response['conclusion']
+            })
+        
+        # Assemble the document with all questions
+        doc_bytes = assemble_multi_question_document(questions_data)
         
         return send_file(
             io.BytesIO(doc_bytes),
